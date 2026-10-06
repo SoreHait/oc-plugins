@@ -1,0 +1,23 @@
+# Dependencies and build output
+node_modules/
+*.tsbuildinfo
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+*.bak
+
+# Logs, scratch files and merge leftovers
+*.log
+*.tmp
+*.orig
+*.rej
+
+# Local secrets (keep checked-in examples)
+.env
+.env.*
+!.env.example

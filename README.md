@@ -1,0 +1,1 @@
+this repo is an opencode plugins catalog that i personally use, made purely by chatting with ai through opencode
