@@ -6,6 +6,7 @@ import { join } from "node:path"
 
 const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 const CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+const CHATGPT_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/codex/rate-limit-reset-credits"
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 const REFRESH_MS = 60_000
 const BAR_CELLS = 25
@@ -18,9 +19,15 @@ type UsageWindow = {
   exhausted: boolean
 }
 
+type ResetCredits = {
+  count: number
+  expiresAt?: number
+}
+
 type UsageSource = {
   title: string
   windows: UsageWindow[]
+  credits?: ResetCredits
   error?: string
 }
 
@@ -167,7 +174,26 @@ async function fetchChatGPTUsage(auth: ChatGPTCredential): Promise<UsageSource> 
     })
   }
   const plan = typeof body?.plan_type === "string" ? body.plan_type : auth.plan
-  return { title: chatgptTitle(plan), windows }
+  return { title: chatgptTitle(plan), windows, credits: await fetchChatGPTResetCredits(headers) }
+}
+
+async function fetchChatGPTResetCredits(headers: Record<string, string>): Promise<ResetCredits | undefined> {
+  try {
+    const response = await fetch(CHATGPT_RESET_CREDITS_URL, { headers })
+    if (!response.ok) return undefined
+    const body: any = await response.json()
+    const entries = Array.isArray(body?.credits) ? body.credits : []
+    const available = entries.filter((entry: any) => entry?.status === "available")
+    const expiries = available
+      .map((entry: any) => Date.parse(entry?.expires_at))
+      .filter((time: number) => Number.isFinite(time))
+    return {
+      count: Number(body?.available_count ?? available.length),
+      expiresAt: expiries.length > 0 ? Math.min(...expiries) : undefined,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 function chatgptTitle(plan: unknown) {
@@ -245,6 +271,11 @@ function formatRemaining(resetsAt: number | undefined) {
   return `${Math.max(1, minutes)}m`
 }
 
+function expiryDays(expiresAt: number | undefined) {
+  if (!expiresAt) return undefined
+  return Math.max(1, Math.ceil((expiresAt - Date.now()) / 86_400_000))
+}
+
 function UsagePanel(props: { context: Plugin.Context; source: UsageSource }) {
   const theme = props.context.theme
   return (
@@ -270,7 +301,7 @@ function UsagePanel(props: { context: Plugin.Context; source: UsageSource }) {
                   <span style={{ fg: theme.text.muted }}>{"░".repeat(BAR_CELLS - filled())}</span>
                 </text>
               </box>
-              <box flexDirection="row" gap={1} justifyContent="space-between">
+              <box flexDirection="row" gap={1} justifyContent="space-between" paddingLeft={2}>
                 <text fg={theme.text.muted}>{formatRemaining(window.resetsAt)}</text>
                 <text fg={theme.text.muted}>{formatRemainingPercent(window)}</text>
               </box>
@@ -278,6 +309,31 @@ function UsagePanel(props: { context: Plugin.Context; source: UsageSource }) {
           )
         }}
       </For>
+      <Show when={props.source.credits}>
+        {(credits) => {
+          const days = () => (credits().count > 0 ? expiryDays(credits().expiresAt) : undefined)
+          const urgent = () => {
+            const value = days()
+            return value !== undefined && value <= 5
+          }
+          return (
+            <box flexDirection="row" gap={1} justifyContent="space-between">
+              <box flexDirection="row" gap={1}>
+                <text fg={credits().count > 0 ? theme.text.feedback.success.base : theme.text.muted}>•</text>
+                <text fg={theme.text.base}>Resets</text>
+              </box>
+              <text>
+                <span style={{ fg: theme.text.muted }}>
+                  {days() === undefined ? String(credits().count) : `${credits().count} · `}
+                </span>
+                <span style={{ fg: urgent() ? theme.text.feedback.warning.base : theme.text.muted }}>
+                  {days() === undefined ? "" : `exp ${days()}d`}
+                </span>
+              </text>
+            </box>
+          )
+        }}
+      </Show>
       <Show when={props.source.error}>
         <text fg={theme.text.muted}>{props.source.error}</text>
       </Show>
@@ -364,6 +420,7 @@ function SubscriptionUsage(props: { context: Plugin.Context }) {
         setGpt((previous) => ({
           title: previous?.title ?? "ChatGPT",
           windows: previous?.windows ?? [],
+          credits: previous?.credits,
           error: describe(lastError),
         }))
       }
