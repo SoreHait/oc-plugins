@@ -15,7 +15,7 @@ function familyIDs(context: Plugin.Context, sessionID: string) {
 function compact(value: number) {
   if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M"
   if (value >= 1_000) return Math.round(value / 1_000) + "k"
-  return String(value)
+  return String(Math.round(value))
 }
 
 function formatElapsed(milliseconds: number) {
@@ -103,13 +103,13 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
   // Recalibrate characters-per-token from real step accounting so CJK and
   // tool-heavy turns estimate as well as plain English prose.
   let calibrationTokens = untrack(() => tokens().output)
-  let calibrationChars = 0
+  const [calibrationChars, setCalibrationChars] = createSignal(0)
   let calibrations = 0
   createEffect(() => {
     const total = tokens().output
     if (total <= calibrationTokens) return
     const deltaTokens = total - calibrationTokens
-    const deltaChars = untrack(chars) - calibrationChars
+    const deltaChars = untrack(chars) - untrack(calibrationChars)
     if (deltaChars > 0) {
       const ratio = deltaChars / deltaTokens
       if (ratio >= 0.25 && ratio <= 16) {
@@ -118,7 +118,26 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
       }
     }
     calibrationTokens = total
-    calibrationChars = untrack(chars)
+    setCalibrationChars(untrack(chars))
+  })
+
+  // Server usage lands only at step boundaries; streamed characters estimate
+  // the in-flight step's output so the Out row keeps moving between them. The
+  // calibration effect absorbs the same characters at each boundary, so the
+  // estimate resets to zero exactly when the real tokens arrive.
+  const stepTokens = createMemo(() => {
+    if (!running()) return 0
+    const delta = chars() - calibrationChars()
+    return delta > 0 ? delta / charsPerToken() : 0
+  })
+
+  const liveOutput = createMemo(() => {
+    const estimate = stepTokens()
+    const current = turn()
+    return {
+      turn: current === undefined ? undefined : current.output + estimate,
+      total: tokens().output + estimate,
+    }
   })
 
   createEffect(() => {
@@ -280,7 +299,7 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
           <text fg={theme.text.feedback.success.base}>•</text>
           <text fg={theme.text.base}>Out</text>
         </box>
-        <text fg={theme.text.muted}>{formatTokens(turn()?.output, tokens().output)}</text>
+        <text fg={theme.text.muted}>{formatTokens(liveOutput().turn, liveOutput().total)}</text>
       </box>
     </box>
   )
