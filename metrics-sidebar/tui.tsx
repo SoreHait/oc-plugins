@@ -29,7 +29,9 @@ function formatElapsed(milliseconds: number) {
 
 function formatTokens(current: number | undefined, total: number) {
   if (current === undefined) return compact(total)
-  return `${compact(current)} (${compact(total)})`
+  // The live estimate makes the turn value fractional, so round it; full digits
+  // stay unscaled while the session total keeps its compact form.
+  return `${Math.round(current).toLocaleString()} (${compact(total)})`
 }
 
 function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
