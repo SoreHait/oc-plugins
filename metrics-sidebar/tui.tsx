@@ -34,15 +34,28 @@ function formatTokens(current: number | undefined, total: number) {
   return `${Math.round(current).toLocaleString()} (${compact(total)})`
 }
 
+function formatInput(
+  current: { input: number; cached: number } | undefined,
+  total: { input: number; cached: number },
+) {
+  const sum = total.input + total.cached
+  if (current === undefined) return compact(sum)
+  const cached = current.cached > 0 ? " +" + compact(current.cached) : ""
+  return `${Math.round(current.input).toLocaleString()}${cached} (${compact(sum)})`
+}
+
 function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
   const theme = props.context.theme
   const family = createMemo(() => familyIDs(props.context, props.sessionID))
   const tokens = createMemo(() => {
-    const totals = { input: 0, output: 0 }
+    const totals = { input: 0, cached: 0, output: 0 }
     for (const id of family()) {
       const usage = props.context.data.session.get(id)?.tokens
       if (!usage) continue
-      totals.input += usage.input
+      // Prompt tokens split by billing shape: non-cached input plus cache writes
+      // count as "input", cache reads show as the compact cached part.
+      totals.input += usage.input + (usage.cache?.write ?? 0)
+      totals.cached += usage.cache?.read ?? 0
       totals.output += usage.output + usage.reasoning
     }
     return totals
@@ -58,13 +71,14 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
       }
     }
     if (startedAt === undefined) return undefined
-    const totals = { startedAt, input: 0, output: 0 }
+    const totals = { startedAt, input: 0, cached: 0, output: 0 }
     for (const id of family()) {
       for (const message of props.context.data.session.message.list(id)) {
         if (message.time.created <= startedAt) continue
         const usage = "tokens" in message ? message.tokens : undefined
         if (!usage) continue
-        totals.input += usage.input
+        totals.input += usage.input + (usage.cache?.write ?? 0)
+        totals.cached += usage.cache?.read ?? 0
         totals.output += usage.output + usage.reasoning
       }
     }
@@ -294,7 +308,7 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
           <text fg={theme.text.feedback.success.base}>•</text>
           <text fg={theme.text.base}>In</text>
         </box>
-        <text fg={theme.text.muted}>{formatTokens(turn()?.input, tokens().input)}</text>
+        <text fg={theme.text.muted}>{formatInput(turn(), tokens())}</text>
       </box>
       <box flexDirection="row" gap={1} justifyContent="space-between">
         <box flexDirection="row" gap={1}>
