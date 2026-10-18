@@ -67,7 +67,10 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
     // Prefer the window of the currently selected model so switching models
     // updates the limit immediately; fall back to the model behind the usage.
     const limit = selected()?.limit.context ?? model?.limit.context
-    return { tokens, limit, percent: limit ? Math.round((tokens / limit) * 100) : undefined }
+    // Two decimals keep small usage deltas visible in the sub-line and align
+    // the bar fill with the displayed percent.
+    const percent = limit ? Math.round((tokens / limit) * 10_000) / 100 : undefined
+    return { tokens, limit, percent }
   })
 
   const color = () => {
@@ -80,7 +83,8 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
   const filled = () => {
     const percent = usage().percent
     if (percent === undefined) return 0
-    return Math.max(0, Math.min(BAR_CELLS, Math.floor((percent / 100) * BAR_CELLS)))
+    // Used-based bar: any positive slice lights its cell, so round up.
+    return Math.max(0, Math.min(BAR_CELLS, Math.ceil((percent / 100) * BAR_CELLS)))
   }
   const window = () => {
     const value = usage()
@@ -131,7 +135,7 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
         </box>
         <box flexDirection="row" gap={1} justifyContent="space-between" paddingLeft={2}>
           <text fg={theme.text.muted}>{window()}</text>
-          <text fg={theme.text.muted}>{usage().percent === undefined ? "" : usage().percent + "%"}</text>
+          <text fg={theme.text.muted}>{usage().percent === undefined ? "" : usage().percent.toFixed(2) + "%"}</text>
         </box>
         <box flexDirection="row" gap={1} justifyContent="space-between">
           <box flexDirection="row" gap={1}>

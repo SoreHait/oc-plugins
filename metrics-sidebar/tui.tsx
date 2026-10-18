@@ -23,8 +23,9 @@ function formatElapsed(milliseconds: number) {
   const hours = Math.floor(total / 3_600)
   const minutes = Math.floor((total % 3_600) / 60)
   const seconds = total % 60
-  const pad = (value: number) => String(value).padStart(2, "0")
-  return `${pad(hours)}h ${pad(minutes)}m ${pad(seconds)}s`
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
 }
 
 function formatTokens(current: number | undefined, total: number) {
@@ -34,14 +35,16 @@ function formatTokens(current: number | undefined, total: number) {
   return `${Math.round(current).toLocaleString()} (${compact(total)})`
 }
 
-function formatInput(
-  current: { input: number; cached: number } | undefined,
-  total: { input: number; cached: number },
-) {
-  const sum = total.input + total.cached
-  if (current === undefined) return compact(sum)
-  const cached = current.cached > 0 ? " +" + compact(current.cached) : ""
-  return `${Math.round(current.input).toLocaleString()}${cached} (${compact(sum)})`
+function formatRate(percent: number | undefined) {
+  return percent === undefined ? "--" : percent.toFixed(1) + "%"
+}
+
+// 0 = success, 1 = warning, 2 = error, -1 = no rate yet.
+function severity(percent: number | undefined) {
+  if (percent === undefined) return -1
+  if (percent > 95) return 0
+  if (percent > 85) return 1
+  return 2
 }
 
 function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
@@ -52,8 +55,8 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
     for (const id of family()) {
       const usage = props.context.data.session.get(id)?.tokens
       if (!usage) continue
-      // Prompt tokens split by billing shape: non-cached input plus cache writes
-      // count as "input", cache reads show as the compact cached part.
+      // Prompt tokens split by cache outcome: non-cached input (including
+      // cache writes) stays on the Input row, reads on Cached Input.
       totals.input += usage.input + (usage.cache?.write ?? 0)
       totals.cached += usage.cache?.read ?? 0
       totals.output += usage.output + usage.reasoning
@@ -83,6 +86,32 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
       }
     }
     return totals
+  })
+
+  const rateColor = (percent: number | undefined) => {
+    const level = severity(percent)
+    if (level === 0) return theme.text.feedback.success.base
+    if (level === 1) return theme.text.feedback.warning.base
+    if (level === 2) return theme.text.feedback.error.base
+    return theme.text.muted
+  }
+
+  // The current-turn cache-hit rate colors its bracket and the Input dot; the
+  // whole-session rate is informational and stays muted.
+  const cached = createMemo(() => {
+    const current = turn()
+    const total = tokens()
+    const rate = (hits: number, misses: number) => {
+      const sum = hits + misses
+      return sum > 0 ? Math.round((hits / sum) * 1000) / 10 : undefined
+    }
+    const turnRate = current === undefined ? undefined : rate(current.cached, current.input)
+    return {
+      turn: current === undefined ? 0 : Math.round(current.cached),
+      total: total.cached,
+      turnRate,
+      color: rateColor(turnRate),
+    }
   })
 
   const [now, setNow] = createSignal(Date.now())
@@ -305,15 +334,22 @@ function MetricsPanel(props: { context: Plugin.Context; sessionID: string }) {
       </box>
       <box flexDirection="row" gap={1} justifyContent="space-between">
         <box flexDirection="row" gap={1}>
-          <text fg={theme.text.feedback.success.base}>•</text>
-          <text fg={theme.text.base}>In</text>
+          <text fg={cached().color}>•</text>
+          <text fg={theme.text.base}>Input</text>
         </box>
-        <text fg={theme.text.muted}>{formatInput(turn(), tokens())}</text>
+        <text fg={theme.text.muted}>{formatTokens(turn()?.input, tokens().input)}</text>
+      </box>
+      <box flexDirection="row" paddingLeft={2} justifyContent="flex-end">
+        <text fg={theme.text.muted} wrapMode="none">
+          {cached().turn.toLocaleString()}
+          <span style={{ fg: cached().color }}>{` [${formatRate(cached().turnRate)}]`}</span>
+          {` (${compact(cached().total)})`}
+        </text>
       </box>
       <box flexDirection="row" gap={1} justifyContent="space-between">
         <box flexDirection="row" gap={1}>
           <text fg={theme.text.feedback.success.base}>•</text>
-          <text fg={theme.text.base}>Out</text>
+          <text fg={theme.text.base}>Output</text>
         </box>
         <text fg={theme.text.muted}>{formatTokens(liveOutput().turn, liveOutput().total)}</text>
       </box>
