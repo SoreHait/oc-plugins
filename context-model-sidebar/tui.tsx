@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, For, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js"
 
 // Replaces the builtin `opencode.sidebar.context` panel in place: desired
 // plugins are keyed by id, so an external plugin with the same id overwrites
@@ -43,6 +43,33 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
     props.context.location ??
     props.context.data.location.default()
 
+  // Auto-compaction is not part of the model metadata: its trigger comes from
+  // the merged config. Plugins only reach it through the client API, so load
+  // the document entries and mirror the core merge (last defined field wins).
+  const [compaction, setCompaction] = createSignal<{ auto: boolean; buffer: number | undefined }>({
+    auto: true,
+    buffer: undefined,
+  })
+  let configRequest = 0
+  createEffect(() => {
+    const directory = location().directory
+    const request = ++configRequest
+    void props.context.client.config
+      .get({ location: { directory } })
+      .then((entries) => {
+        if (request !== configRequest) return
+        let auto = true
+        let buffer: number | undefined
+        for (const entry of entries) {
+          if (entry.type !== "document" || !entry.info.compaction) continue
+          auto = entry.info.compaction.auto ?? auto
+          buffer = entry.info.compaction.buffer ?? buffer
+        }
+        setCompaction({ auto, buffer })
+      })
+      .catch(() => {})
+  })
+
   createEffect(() => {
     void props.context.data.location.model.sync(location())
   })
@@ -58,7 +85,12 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
     const messages = props.context.data.session.message.list(props.sessionID)
     const boundary = props.context.data.session.get(props.sessionID)?.revert?.messageID
     const last = lastUsage(messages, boundary)
-    if (!last) return { tokens: 0, limit: selected()?.limit.context, percent: 0 }
+    if (!last) {
+      const model = selected()
+      const full = model?.limit.context
+      const input = model?.limit.input
+      return { tokens: 0, full, input, scale: input || full, percent: 0 }
+    }
     const tokens =
       last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
     const model = models().find(
@@ -66,18 +98,24 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
     )
     // Prefer the window of the currently selected model so switching models
     // updates the limit immediately; fall back to the model behind the usage.
-    const limit = selected()?.limit.context ?? model?.limit.context
+    const active = selected() ?? model
+    const full = active?.limit.context
+    const input = active?.limit.input
+    // The bar measures against the window the provider actually accepts: the
+    // input limit when present, otherwise the full context window.
+    const scale = input || full
     // Two decimals keep small usage deltas visible in the sub-line and align
     // the bar fill with the displayed percent.
-    const percent = limit ? Math.round((tokens / limit) * 10_000) / 100 : undefined
-    return { tokens, limit, percent }
+    const percent = scale ? Math.round((tokens / scale) * 10_000) / 100 : undefined
+    return { tokens, full, input, scale, percent }
   })
 
   const color = () => {
-    const percent = usage().percent
-    if (percent === undefined) return theme.text.muted
-    if (percent > 80) return theme.text.feedback.error.base
-    if (percent > 60) return theme.text.feedback.warning.base
+    const value = usage()
+    const ceiling = threshold()
+    if (ceiling === undefined) return theme.text.muted
+    if (value.tokens >= ceiling) return theme.text.feedback.error.base
+    if (value.tokens >= ceiling * 0.8) return theme.text.feedback.warning.base
     return theme.text.feedback.success.base
   }
   const filled = () => {
@@ -86,10 +124,65 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
     // Used-based bar: any positive slice lights its cell, so round up.
     return Math.max(0, Math.min(BAR_CELLS, Math.ceil((percent / 100) * BAR_CELLS)))
   }
+  // Mirrors SessionCompaction.calculateCeiling: the bar's window (input limit
+  // when present, otherwise the full context) minus the configured or derived
+  // reserve. With auto-compaction off there is no real trigger, so use an
+  // assumed 90% ceiling only for the warning bands (no tick is drawn).
+  const threshold = createMemo(() => {
+    const scale = usage().scale
+    if (!scale || scale <= 0) return undefined
+    const settings = compaction()
+    if (!settings.auto) return scale * 0.9
+    const reserve = settings.buffer ?? Math.max(Math.floor(scale * 0.1), scale >= 32_000 ? 16_000 : 0)
+    return scale - reserve
+  })
+  const thresholdPercent = createMemo(() => {
+    const ceiling = threshold()
+    const scale = usage().scale
+    if (ceiling === undefined || !scale || scale <= 0) return undefined
+    return Math.round((ceiling / scale) * 10_000) / 100
+  })
+  const marker = createMemo(() => {
+    if (!compaction().auto) return undefined
+    const percent = thresholdPercent()
+    if (percent === undefined) return undefined
+    return Math.max(0, Math.min(BAR_CELLS - 1, Math.floor((percent / 100) * BAR_CELLS)))
+  })
+  const bar = createMemo(() => {
+    const count = filled()
+    const mark = marker()
+    const active = color()
+    const segments: Array<{ text: string; color: string }> = []
+    const add = (text: string, color: string) => {
+      if (text.length > 0) segments.push({ text, color })
+    }
+    if (mark === undefined) {
+      add("█".repeat(count), active)
+      add("░".repeat(BAR_CELLS - count), theme.text.muted)
+      return segments
+    }
+    add("█".repeat(Math.min(count, mark)), active)
+    add("░".repeat(Math.max(0, mark - count)), theme.text.muted)
+    add("┃", theme.text.base)
+    add("█".repeat(Math.max(0, count - mark - 1)), active)
+    add("░".repeat(Math.max(0, BAR_CELLS - Math.max(count, mark + 1))), theme.text.muted)
+    return segments
+  })
   const window = () => {
     const value = usage()
     const used = Math.round(value.tokens).toLocaleString()
-    return value.limit === undefined ? used : `${used} / ${compact(value.limit)}`
+    return value.scale === undefined ? used : `${used} / ${compact(value.scale)}`
+  }
+  const fullText = () => {
+    const value = usage()
+    return value.input === undefined || value.full === undefined ? "" : `full ${compact(value.full)}`
+  }
+  const compactText = () => {
+    if (!compaction().auto) return "auto compact disabled"
+    const ceiling = threshold()
+    const percent = thresholdPercent()
+    if (ceiling === undefined || percent === undefined) return ""
+    return `compact @ ${compact(ceiling)} ${percent.toFixed(2)}%`
   }
   const shorthand = () => {
     const model = selected()
@@ -129,14 +222,26 @@ function ContextPanel(props: { context: Plugin.Context; sessionID: string }) {
             <text fg={theme.text.base}>ctx</text>
           </box>
           <text>
-            <span style={{ fg: color() }}>{"█".repeat(filled())}</span>
-            <span style={{ fg: theme.text.muted }}>{"░".repeat(BAR_CELLS - filled())}</span>
+            <For each={bar()}>
+              {(segment) => <span style={{ fg: segment.color }}>{segment.text}</span>}
+            </For>
           </text>
         </box>
         <box flexDirection="row" gap={1} justifyContent="space-between" paddingLeft={2}>
           <text fg={theme.text.muted}>{window()}</text>
           <text fg={theme.text.muted}>{usage().percent === undefined ? "" : usage().percent.toFixed(2) + "%"}</text>
         </box>
+        <Show when={fullText() || compactText()}>
+          <box
+            flexDirection="row"
+            gap={1}
+            justifyContent={fullText() ? "space-between" : "flex-end"}
+            paddingLeft={2}
+          >
+            <text fg={theme.text.muted}>{fullText()}</text>
+            <text fg={theme.text.muted}>{compactText()}</text>
+          </box>
+        </Show>
         <box flexDirection="row" gap={1} justifyContent="space-between">
           <box flexDirection="row" gap={1}>
             <text fg={theme.text.feedback.success.base}>•</text>
