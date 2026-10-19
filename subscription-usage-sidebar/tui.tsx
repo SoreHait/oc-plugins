@@ -170,7 +170,9 @@ async function fetchChatGPTUsage(auth: ChatGPTCredential): Promise<UsageSource> 
       label: seconds >= 518_400 ? "7d" : `${Math.round(seconds / 3_600)}h`,
       percent,
       resetsAt: Number(item.reset_at) ? Number(item.reset_at) * 1_000 : undefined,
-      exhausted: limit.limit_reached === true || limit.allowed === false || percent >= 100,
+      // `allowed` / `limit_reached` are account-wide: one exhausted window
+      // blocks requests even while the other window still has capacity.
+      exhausted: percent >= 100,
     })
   }
   const plan = typeof body?.plan_type === "string" ? body.plan_type : auth.plan
